@@ -5,6 +5,7 @@
 var TIMEOUT = 2000; // ms
 const flag_TUP = 0x01;
 const flag_AT = 0x40;
+const flag_ED = 0x80;
 
 const cose_kty = 1;
 const cose_kty_ec2 = 2;
@@ -105,16 +106,11 @@ function b64enc(buf) {
 }
 
 function string2buffer(str) {
-  return (new Uint8Array(str.length)).map(function(x, i){ return str.charCodeAt(i) });
+  return new TextEncoder().encode(str);
 }
 
 function buffer2string(buf) {
-  let str = "";
-  if (!(buf.constructor === Uint8Array)) {
-    buf = new Uint8Array(buf);
-  }
-  buf.map(function(x){ return str += String.fromCharCode(x) });
-  return str;
+  return new TextDecoder().decode(buf);
 }
 
 function b64dec(str) {
@@ -265,7 +261,25 @@ function webAuthnDecodeCBORAttestation(aCborAttBuf) {
   return Promise.reject("Unknown attestation format: " + attObj.fmt)
 }
 
+// CBOR.decode rejects trailing bytes, so find where the first item ends.
+function cborFirstItemLength(aBytes) {
+  for (let end = 1; end <= aBytes.length; end++) {
+    try {
+      CBOR.decode(getArrayBuffer("", aBytes.slice(0, end)));
+      return end;
+    } catch (e) {}
+  }
+  throw "No complete CBOR item found";
+}
+
 function webAuthnDecodeAuthDataArray(aAuthData) {
+  if (!(aAuthData instanceof Uint8Array)) {
+    aAuthData = new Uint8Array(aAuthData);
+  }
+  if (aAuthData.length < 37) {
+    throw "Authenticator data is too short: " + aAuthData.length + " bytes";
+  }
+
   let rpIdHash = aAuthData.slice(0, 32);
   let flags = aAuthData.slice(32, 33);
   let counter = aAuthData.slice(33, 37);
@@ -274,7 +288,7 @@ function webAuthnDecodeAuthDataArray(aAuthData) {
   console.log("RP ID Hash: " + hexEncode(rpIdHash));
   console.log("Counter: " + hexEncode(counter) + " Flags: " + flags);
 
-  if ((flags & flag_AT) == 0x00) {
+  if ((flags[0] & flag_AT) == 0x00) {
     // No Attestation Data, so we're done.
     return Promise.resolve({
       rpIdHash: rpIdHash,
@@ -283,19 +297,28 @@ function webAuthnDecodeAuthDataArray(aAuthData) {
     });
   }
 
-  if (aAuthData.length < 38) {
+  if (aAuthData.length < 55) {
     throw "Attestation Data flag was set, but not enough data passed in!";
   }
 
   let attData = {};
   attData.aaguid = aAuthData.slice(37, 53);
   attData.credIdLen = (aAuthData[53] << 8) + aAuthData[54];
+  if (aAuthData.length < 55 + attData.credIdLen) {
+    throw "Credential ID length " + attData.credIdLen + " exceeds authenticator data";
+  }
   attData.credId = aAuthData.slice(55, 55 + attData.credIdLen);
 
   console.log(":: Attestation Data ::");
   console.log("AAGUID: " + hexEncode(attData.aaguid));
 
-  cborPubKey = aAuthData.slice(55 + attData.credIdLen);
+  let cborPubKey = aAuthData.slice(55 + attData.credIdLen);
+  if (flags[0] & flag_ED) {
+    let keyLength = cborFirstItemLength(cborPubKey);
+    attData.extensions = CBOR.decode(getArrayBuffer("", cborPubKey.slice(keyLength)));
+    console.log("Extensions: ", attData.extensions);
+    cborPubKey = cborPubKey.slice(0, keyLength);
+  }
   var pubkeyObj = CBOR.decode(getArrayBuffer("", cborPubKey));
   if (!(cose_kty in pubkeyObj && cose_alg in pubkeyObj && cose_crv in pubkeyObj
         && cose_crv_x in pubkeyObj && cose_crv_y in pubkeyObj)) {
