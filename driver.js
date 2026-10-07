@@ -162,8 +162,9 @@ function assembleRegistrationSignedData(appParam, challengeParam, keyHandle, pub
 function assemblePublicKeyBytesData(xCoord, yCoord) {
   // Produce an uncompressed EC key point. These start with 0x04, and then
   // two 32-byte numbers denoting X and Y.
-  if (xCoord.length != 32 || yCoord.length != 32) {
-    throw ("Coordinates must be 32 bytes long");
+  if (!(xCoord instanceof Uint8Array && yCoord instanceof Uint8Array)
+      || xCoord.length != 32 || yCoord.length != 32) {
+    throw ("Coordinates must be 32-byte byte strings");
   }
   let keyBytes = new Uint8Array(65);
   keyBytes[0] = 0x04;
@@ -185,15 +186,22 @@ var state = {
   keyHandle: null,
 }
 
+function isCborMap(aValue) {
+  return aValue !== null && typeof aValue === "object"
+         && !Array.isArray(aValue) && !(aValue instanceof Uint8Array);
+}
+
 function webAuthnDecodeCBORAttestation(aCborAttBuf) {
   let attObj = CBOR.decode(aCborAttBuf);
   console.log(":: Attestation CBOR Object ::");
-  if (!("authData" in attObj && "fmt" in attObj && "attStmt" in attObj)) {
+  if (!(isCborMap(attObj) && typeof attObj.fmt === "string"
+        && attObj.authData instanceof Uint8Array && isCborMap(attObj.attStmt))) {
     throw "Invalid CBOR Attestation Object";
   }
 
   if (attObj.fmt == "fido-u2f") {
-    if (!("sig" in attObj.attStmt && "x5c" in attObj.attStmt)) {
+    if (!(attObj.attStmt.sig instanceof Uint8Array && Array.isArray(attObj.attStmt.x5c)
+          && attObj.attStmt.x5c.every(c => c instanceof Uint8Array))) {
       throw "Invalid CBOR Attestation Statement";
     }
 
@@ -239,8 +247,7 @@ function webAuthnDecodeCBORAttestation(aCborAttBuf) {
       testEqual("createOut", sigAsn1.result.block_length, getArrayBuffer("createOut", state.attestationSig).byteLength, "Signature buffer has no unnecessary bytes.");
 
       append("createOut", "Attestation Signature (by the key in the cert, over the new credential):\n");
-      let R = new Uint8Array(sigAsn1.result.value_block.value[0].value_block.value_hex);
-      let S = new Uint8Array(sigAsn1.result.value_block.value[1].value_block.value_hex);
+      let [R, S] = ecdsaSigComponents(sigAsn1);
       append("createOut", "R-component: " + hexEncode(R) + "\n");
       append("createOut", "S-component: " + hexEncode(S) + "\n");
 
@@ -250,6 +257,9 @@ function webAuthnDecodeCBORAttestation(aCborAttBuf) {
   }
 
   if (attObj.fmt == "none") {
+    if (Object.keys(attObj.attStmt).length != 0) {
+      throw "\"none\" attestation must have an empty attStmt";
+    }
     append("createOut", "\n:: \"None\" Attestation Format ::\n");
     return webAuthnDecodeAuthDataArray(new Uint8Array(attObj.authData))
     .then(function (aAttestationObj) {
@@ -267,9 +277,26 @@ function cborFirstItemLength(aBytes) {
     try {
       CBOR.decode(getArrayBuffer("", aBytes.slice(0, end)));
       return end;
-    } catch (e) {}
+    } catch (e) {
+      // A RangeError means the item runs past `end`; anything else is malformed.
+      if (!(e instanceof RangeError)) {
+        throw e;
+      }
+    }
   }
   throw "No complete CBOR item found";
+}
+
+function decodeExtensions(aBytes) {
+  if (aBytes.length == 0) {
+    throw "Extension Data flag was set, but no extensions were passed in";
+  }
+  let extensions = CBOR.decode(getArrayBuffer("", aBytes));
+  if (!isCborMap(extensions)) {
+    throw "Extensions must be a CBOR map";
+  }
+  console.log("Extensions: ", extensions);
+  return extensions;
 }
 
 function webAuthnDecodeAuthDataArray(aAuthData) {
@@ -289,12 +316,18 @@ function webAuthnDecodeAuthDataArray(aAuthData) {
   console.log("Counter: " + hexEncode(counter) + " Flags: " + flags);
 
   if ((flags[0] & flag_AT) == 0x00) {
-    // No Attestation Data, so we're done.
-    return Promise.resolve({
+    // No Attestation Data, so only extensions can follow the counter.
+    let result = {
       rpIdHash: rpIdHash,
       flags: flags,
       counter: counter,
-    });
+    };
+    if (flags[0] & flag_ED) {
+      result.extensions = decodeExtensions(aAuthData.slice(37));
+    } else if (aAuthData.length != 37) {
+      throw "Unexpected " + (aAuthData.length - 37) + " bytes after the counter";
+    }
+    return Promise.resolve(result);
   }
 
   if (aAuthData.length < 55) {
@@ -315,22 +348,21 @@ function webAuthnDecodeAuthDataArray(aAuthData) {
   let cborPubKey = aAuthData.slice(55 + attData.credIdLen);
   if (flags[0] & flag_ED) {
     let keyLength = cborFirstItemLength(cborPubKey);
-    attData.extensions = CBOR.decode(getArrayBuffer("", cborPubKey.slice(keyLength)));
-    console.log("Extensions: ", attData.extensions);
+    attData.extensions = decodeExtensions(cborPubKey.slice(keyLength));
     cborPubKey = cborPubKey.slice(0, keyLength);
   }
   var pubkeyObj = CBOR.decode(getArrayBuffer("", cborPubKey));
-  if (!(cose_kty in pubkeyObj && cose_alg in pubkeyObj && cose_crv in pubkeyObj
+  if (!(isCborMap(pubkeyObj) && cose_kty in pubkeyObj && cose_alg in pubkeyObj && cose_crv in pubkeyObj
         && cose_crv_x in pubkeyObj && cose_crv_y in pubkeyObj)) {
     throw "Invalid CBOR Public Key Object";
   }
-  if (pubkeyObj[cose_kty] != cose_kty_ec2) {
+  if (pubkeyObj[cose_kty] !== cose_kty_ec2) {
     throw "Unexpected key type";
   }
-  if (pubkeyObj[cose_alg] != cose_alg_ECDSA_w_SHA256) {
+  if (pubkeyObj[cose_alg] !== cose_alg_ECDSA_w_SHA256) {
     throw "Unexpected public key algorithm";
   }
-  if (pubkeyObj[cose_crv] != cose_crv_P256) {
+  if (pubkeyObj[cose_crv] !== cose_crv_P256) {
     throw "Unexpected curve";
   }
 
@@ -429,6 +461,15 @@ function asn1Okay(asn1) {
   return true;
 }
 
+function ecdsaSigComponents(sigAsn1) {
+  let parts = sigAsn1.result.value_block.value;
+  if (!Array.isArray(parts) || parts.length != 2
+      || !parts.every(p => p.value_block && p.value_block.value_hex)) {
+    throw "Attestation signature is not a SEQUENCE of two INTEGERs";
+  }
+  return parts.map(p => new Uint8Array(p.value_block.value_hex));
+}
+
 function promiseU2FRegister(aAppId, aChallenges, aExcludedKeys, aFunc) {
   return new Promise(function(resolve, reject) {
       u2f.register(aAppId, aChallenges, aExcludedKeys, function(res) {
@@ -475,12 +516,18 @@ function doU2FRegister(challengeBytes) {
 
     // Parse the response data
     var registrationData = b64dec(regResponse.registrationData);
+    if (registrationData.length < 67) {
+      throw "Registration data is too short: " + registrationData.length + " bytes";
+    }
     if (registrationData[0] != 0x05) {
       throw "Reserved byte not set correctly";
     }
 
     state.publicKeyBytes = registrationData.subarray(1, 66);
     var keyHandleLength = registrationData[66];
+    if (registrationData.length <= 67 + keyHandleLength) {
+      throw "Key handle length " + keyHandleLength + " leaves no room for the attestation certificate";
+    }
     state.keyHandleBytes = registrationData.subarray(67, 67 + keyHandleLength)
     state.keyHandle = b64enc(state.keyHandleBytes);
     state.attestation = new Uint8Array(registrationData.subarray(67 + keyHandleLength));
@@ -504,8 +551,7 @@ function doU2FRegister(challengeBytes) {
     }
 
     append("createOut", "Attestation Signature\n");
-    var R = new Uint8Array(sigAsn1.result.value_block.value[0].value_block.value_hex);
-    var S = new Uint8Array(sigAsn1.result.value_block.value[1].value_block.value_hex);
+    var [R, S] = ecdsaSigComponents(sigAsn1);
     append("createOut", "R: " + hexEncode(R) + "\n");
     append("createOut", "S: " + hexEncode(S) + "\n");
 
