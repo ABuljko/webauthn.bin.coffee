@@ -111,8 +111,8 @@ function encode(value) {
 
     switch (typeof value) {
       case "number":
-        if (Math.floor(value) === value) {
-          if (0 <= value && value <= POW_2_53)
+        if (Math.floor(value) === value && !Object.is(value, -0)) {
+          if (0 <= value && value < POW_2_53)
             return writeTypeAndLength(0, value);
           if (-POW_2_53 <= value && value < 0)
             return writeTypeAndLength(1, -(value + 1));
@@ -121,30 +121,7 @@ function encode(value) {
         return writeFloat64(value);
 
       case "string":
-        var utf8data = [];
-        for (i = 0; i < value.length; ++i) {
-          var charCode = value.charCodeAt(i);
-          if (charCode < 0x80) {
-            utf8data.push(charCode);
-          } else if (charCode < 0x800) {
-            utf8data.push(0xc0 | charCode >> 6);
-            utf8data.push(0x80 | charCode & 0x3f);
-          } else if (charCode < 0xd800) {
-            utf8data.push(0xe0 | charCode >> 12);
-            utf8data.push(0x80 | (charCode >> 6)  & 0x3f);
-            utf8data.push(0x80 | charCode & 0x3f);
-          } else {
-            charCode = (charCode & 0x3ff) << 10;
-            charCode |= value.charCodeAt(++i) & 0x3ff;
-            charCode += 0x10000;
-
-            utf8data.push(0xf0 | charCode >> 18);
-            utf8data.push(0x80 | (charCode >> 12)  & 0x3f);
-            utf8data.push(0x80 | (charCode >> 6)  & 0x3f);
-            utf8data.push(0x80 | charCode & 0x3f);
-          }
-        }
-
+        var utf8data = new TextEncoder().encode(value);
         writeTypeAndLength(3, utf8data.length);
         return writeUint8Array(utf8data);
 
@@ -234,7 +211,10 @@ function decode(data, tagger, simpleValue) {
     return commitRead(4, dataView.getUint32(offset));
   }
   function readUint64() {
-    return readUint32() * POW_2_32 + readUint32();
+    var high = readUint32();
+    if (high >= POW_2_53 / POW_2_32)
+      throw "Integer too large to represent exactly";
+    return high * POW_2_32 + readUint32();
   }
   function readBreak() {
     if (dataView.getUint8(offset) !== 0xff)
@@ -267,36 +247,9 @@ function decode(data, tagger, simpleValue) {
     return length;
   }
 
-  function appendUtf16Data(utf16data, length) {
-    for (var i = 0; i < length; ++i) {
-      var value = readUint8();
-      if (value & 0x80) {
-        if (value < 0xe0) {
-          value = (value & 0x1f) <<  6
-                | (readUint8() & 0x3f);
-          length -= 1;
-        } else if (value < 0xf0) {
-          value = (value & 0x0f) << 12
-                | (readUint8() & 0x3f) << 6
-                | (readUint8() & 0x3f);
-          length -= 2;
-        } else {
-          value = (value & 0x0f) << 18
-                | (readUint8() & 0x3f) << 12
-                | (readUint8() & 0x3f) << 6
-                | (readUint8() & 0x3f);
-          length -= 3;
-        }
-      }
-
-      if (value < 0x10000) {
-        utf16data.push(value);
-      } else {
-        value -= 0x10000;
-        utf16data.push(0xd800 | (value >> 10));
-        utf16data.push(0xdc00 | (value & 0x3ff));
-      }
-    }
+  var utf8Decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  function readUtf8String(length) {
+    return utf8Decoder.decode(readArrayBuffer(length));
   }
 
   function decodeItem() {
@@ -318,7 +271,7 @@ function decode(data, tagger, simpleValue) {
     }
 
     length = readLength(additionalInformation);
-    if (length < 0 && (majorType < 2 || 6 < majorType))
+    if (length < 0 && (majorType < 2 || 5 < majorType))
       throw "Invalid length";
 
     switch (majorType) {
@@ -344,13 +297,13 @@ function decode(data, tagger, simpleValue) {
         }
         return readArrayBuffer(length);
       case 3:
-        var utf16data = [];
         if (length < 0) {
+          var chunks = [];
           while ((length = readIndefiniteStringLength(majorType)) >= 0)
-            appendUtf16Data(utf16data, length);
-        } else
-          appendUtf16Data(utf16data, length);
-        return String.fromCharCode.apply(null, utf16data);
+            chunks.push(readUtf8String(length));
+          return chunks.join("");
+        }
+        return readUtf8String(length);
       case 4:
         var retArray;
         if (length < 0) {
@@ -367,7 +320,15 @@ function decode(data, tagger, simpleValue) {
         var retObject = {};
         for (i = 0; i < length || length < 0 && !readBreak(); ++i) {
           var key = decodeItem();
-          retObject[key] = decodeItem();
+          if (Object.prototype.hasOwnProperty.call(retObject, key))
+            throw "Duplicate map key: " + key;
+          // Plain assignment would let a "__proto__" key replace the prototype.
+          Object.defineProperty(retObject, key, {
+            value: decodeItem(),
+            writable: true,
+            enumerable: true,
+            configurable: true
+          });
         }
         return retObject;
       case 6:
