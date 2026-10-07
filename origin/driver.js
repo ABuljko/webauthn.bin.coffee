@@ -139,22 +139,40 @@ function importPublicKey(keyBytes) {
 //   });
 // }
 
+function derIntegerToBytes32(der, offset) {
+  if (der[offset] != 0x02) {
+    throw "Invalid signature: expected INTEGER at offset " + offset;
+  }
+  let len = der[offset + 1];
+  let value = der.subarray(offset + 2, offset + 2 + len);
+  if (len < 1 || value.length != len) {
+    throw "Invalid signature: truncated INTEGER at offset " + offset;
+  }
+  while (value.length > 32 && value[0] == 0x00) {
+    value = value.subarray(1);
+  }
+  if (value.length > 32) {
+    throw "Invalid signature: INTEGER longer than 32 bytes";
+  }
+  let bytes = new Uint8Array(32);
+  bytes.set(value, 32 - value.length);
+  return { bytes: bytes, length: len, next: offset + 2 + len };
+}
+
 function verifySignature(key, data, derSig) {
-  if (derSig.byteLength < 70) {
+  if (derSig.length < 8 || derSig[0] != 0x30 || derSig[1] != derSig.length - 2) {
     console.log("bad sig: " + hexEncode(derSig))
-    throw "Invalid signature length: " + derSig.byteLength;
+    throw "Invalid signature encoding (length " + derSig.length + ")";
   }
 
-  // Poor man's ASN.1 decode
-  // R and S are always 32 bytes.  If ether has a DER
-  // length > 32, it's just zeros we can chop off.
-  var lenR = derSig[3];
-  var lenS = derSig[3 + lenR + 2];
-  var padR = lenR - 32;
-  var padS = lenS - 32;
+  let r = derIntegerToBytes32(derSig, 2);
+  let s = derIntegerToBytes32(derSig, r.next);
+  if (s.next != derSig.length) {
+    throw "Invalid signature: trailing bytes after S";
+  }
   var sig = new Uint8Array(64);
-  derSig.subarray(4+padR,4+lenR).map(function(x,i) { return sig[i] = x });
-  derSig.subarray(4+lenR+2+padS,4+lenR+2+lenS).map(function(x,i) { return sig[32+i] = x });
+  sig.set(r.bytes, 0);
+  sig.set(s.bytes, 32);
 
   console.log("data: " + hexEncode(data));
   console.log("der:  " + hexEncode(derSig));
@@ -283,7 +301,7 @@ $(document).ready(function() {
       append("createOut", "Validity (in millis): " + (state.attestationCert.notAfter.value - state.attestationCert.notBefore.value + "\n"));
 
       let sigAsn1 = org.pkijs.fromBER(state.attestationSig.buffer);
-      if (!test("createOut", asn1Okay(certAsn1), "Attestation Signature is OK")) {
+      if (!test("createOut", asn1Okay(sigAsn1), "Attestation Signature is OK")) {
         throw "Attestation Signature failed to validate";
       }
 
@@ -302,7 +320,7 @@ $(document).ready(function() {
       })
       .catch(function(aErr) {
         console.log("Credentials.Create: Error importing key ", aErr);
-        throw "Error Importing Key: " + err;
+        throw "Error Importing Key: " + aErr;
       });
 
     }).catch(function (aErr) {

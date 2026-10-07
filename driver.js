@@ -5,6 +5,7 @@
 var TIMEOUT = 2000; // ms
 const flag_TUP = 0x01;
 const flag_AT = 0x40;
+const flag_ED = 0x80;
 
 const cose_kty = 1;
 const cose_kty_ec2 = 2;
@@ -16,7 +17,7 @@ const cose_crv_x = -2;
 const cose_crv_y = -3;
 
 class ResultTracker {
-  construct() {
+  constructor() {
     this.reset()
   }
   reset() {
@@ -105,16 +106,11 @@ function b64enc(buf) {
 }
 
 function string2buffer(str) {
-  return (new Uint8Array(str.length)).map(function(x, i){ return str.charCodeAt(i) });
+  return new TextEncoder().encode(str);
 }
 
 function buffer2string(buf) {
-  let str = "";
-  if (!(buf.constructor === Uint8Array)) {
-    buf = new Uint8Array(buf);
-  }
-  buf.map(function(x){ return str += String.fromCharCode(x) });
-  return str;
+  return new TextDecoder().decode(buf);
 }
 
 function b64dec(str) {
@@ -215,7 +211,7 @@ function webAuthnDecodeCBORAttestation(aCborAttBuf) {
       append("createOut", "PEM-encoded Certificate:\n-----BEGIN CERTIFICATE-----\n" + state.attestationCertDER.replace(/(.{60})/g, "$1\n") + "\n-----END CERTIFICATE-----\n");
       console.log("DER-encoded Certificate: ", state.attestationCertDER);
 
-      let certAsn1 = org.pkijs.fromBER(getArrayBuffer("createOut", state.attestationCertDER));
+      let certAsn1 = org.pkijs.fromBER(getArrayBuffer("createOut", attObj.attStmt.x5c[0]));
       if (!test("createOut", asn1Okay(certAsn1), "Attestation Certificate parsed")) {
         throw "Attestation Certificate didn't parse correctly.";
       }
@@ -228,7 +224,7 @@ function webAuthnDecodeCBORAttestation(aCborAttBuf) {
 
       state.attestationSig = attObj.attStmt.sig;
       let sigAsn1 = org.pkijs.fromBER(getArrayBuffer("createOut", state.attestationSig));
-      if (!test("createOut", asn1Okay(certAsn1), "Attestation Signature parsed")) {
+      if (!test("createOut", asn1Okay(sigAsn1), "Attestation Signature parsed")) {
         throw "Attestation Signature failed to validate";
       }
 
@@ -265,7 +261,25 @@ function webAuthnDecodeCBORAttestation(aCborAttBuf) {
   return Promise.reject("Unknown attestation format: " + attObj.fmt)
 }
 
+// CBOR.decode rejects trailing bytes, so find where the first item ends.
+function cborFirstItemLength(aBytes) {
+  for (let end = 1; end <= aBytes.length; end++) {
+    try {
+      CBOR.decode(getArrayBuffer("", aBytes.slice(0, end)));
+      return end;
+    } catch (e) {}
+  }
+  throw "No complete CBOR item found";
+}
+
 function webAuthnDecodeAuthDataArray(aAuthData) {
+  if (!(aAuthData instanceof Uint8Array)) {
+    aAuthData = new Uint8Array(aAuthData);
+  }
+  if (aAuthData.length < 37) {
+    throw "Authenticator data is too short: " + aAuthData.length + " bytes";
+  }
+
   let rpIdHash = aAuthData.slice(0, 32);
   let flags = aAuthData.slice(32, 33);
   let counter = aAuthData.slice(33, 37);
@@ -274,7 +288,7 @@ function webAuthnDecodeAuthDataArray(aAuthData) {
   console.log("RP ID Hash: " + hexEncode(rpIdHash));
   console.log("Counter: " + hexEncode(counter) + " Flags: " + flags);
 
-  if ((flags & flag_AT) == 0x00) {
+  if ((flags[0] & flag_AT) == 0x00) {
     // No Attestation Data, so we're done.
     return Promise.resolve({
       rpIdHash: rpIdHash,
@@ -283,19 +297,28 @@ function webAuthnDecodeAuthDataArray(aAuthData) {
     });
   }
 
-  if (aAuthData.length < 38) {
+  if (aAuthData.length < 55) {
     throw "Attestation Data flag was set, but not enough data passed in!";
   }
 
   let attData = {};
   attData.aaguid = aAuthData.slice(37, 53);
   attData.credIdLen = (aAuthData[53] << 8) + aAuthData[54];
+  if (aAuthData.length < 55 + attData.credIdLen) {
+    throw "Credential ID length " + attData.credIdLen + " exceeds authenticator data";
+  }
   attData.credId = aAuthData.slice(55, 55 + attData.credIdLen);
 
   console.log(":: Attestation Data ::");
   console.log("AAGUID: " + hexEncode(attData.aaguid));
 
-  cborPubKey = aAuthData.slice(55 + attData.credIdLen);
+  let cborPubKey = aAuthData.slice(55 + attData.credIdLen);
+  if (flags[0] & flag_ED) {
+    let keyLength = cborFirstItemLength(cborPubKey);
+    attData.extensions = CBOR.decode(getArrayBuffer("", cborPubKey.slice(keyLength)));
+    console.log("Extensions: ", attData.extensions);
+    cborPubKey = cborPubKey.slice(0, keyLength);
+  }
   var pubkeyObj = CBOR.decode(getArrayBuffer("", cborPubKey));
   if (!(cose_kty in pubkeyObj && cose_alg in pubkeyObj && cose_crv in pubkeyObj
         && cose_crv_x in pubkeyObj && cose_crv_y in pubkeyObj)) {
@@ -346,25 +369,43 @@ function importPublicKey(keyBytes) {
   return crypto.subtle.importKey("jwk", jwk, {name: "ECDSA", namedCurve: "P-256"}, true, ["verify"])
 }
 
+function derIntegerToBytes32(der, offset) {
+  if (der[offset] != 0x02) {
+    throw "Invalid signature: expected INTEGER at offset " + offset;
+  }
+  let len = der[offset + 1];
+  let value = der.subarray(offset + 2, offset + 2 + len);
+  if (len < 1 || value.length != len) {
+    throw "Invalid signature: truncated INTEGER at offset " + offset;
+  }
+  while (value.length > 32 && value[0] == 0x00) {
+    value = value.subarray(1);
+  }
+  if (value.length > 32) {
+    throw "Invalid signature: INTEGER longer than 32 bytes";
+  }
+  let bytes = new Uint8Array(32);
+  bytes.set(value, 32 - value.length);
+  return { bytes: bytes, length: len, next: offset + 2 + len };
+}
+
 function verifySignature(key, data, derSig) {
   let derSigArray = new Uint8Array(derSig);
-  if (derSig.byteLength < 70) {
+  if (derSigArray.length < 8 || derSigArray[0] != 0x30 || derSigArray[1] != derSigArray.length - 2) {
     console.log("bad sig: " + hexEncode(derSigArray))
-    throw "Invalid signature length: " + derSig.byteLength;
+    throw "Invalid signature encoding (length " + derSigArray.length + ")";
   }
 
-  // Poor man's ASN.1 decode
-  // R and S are always 32 bytes.  If ether has a DER
-  // length > 32, it's just zeros we can chop off.
-  let lenR = derSigArray[3];
-  let lenS = derSigArray[3 + lenR + 2];
-  let padR = lenR - 32;
-  let padS = lenS - 32;
+  let r = derIntegerToBytes32(derSigArray, 2);
+  let s = derIntegerToBytes32(derSigArray, r.next);
+  if (s.next != derSigArray.length) {
+    throw "Invalid signature: trailing bytes after S";
+  }
   let sig = new Uint8Array(64);
-  derSigArray.subarray(4+padR,4+lenR).map(function(x,i) { return sig[i] = x });
-  derSigArray.subarray(4+lenR+2+padS,4+lenR+2+lenS).map(function(x,i) { return sig[32+i] = x });
+  sig.set(r.bytes, 0);
+  sig.set(s.bytes, 32);
 
-  console.log("lenR:   ", lenR, " lenS: ", lenS);
+  console.log("lenR:   ", r.length, " lenS: ", s.length);
   console.log("key:    ", key, hexEncode(key));
   console.log("data:   ", data, hexEncode(data));
   console.log("derSig: ", derSigArray, hexEncode(derSigArray));
@@ -607,7 +648,7 @@ function doWebAuthnCreate(challengeBytes) {
     append("createOut", "\n\nRaw request:\n");
     append("createOut", JSON.stringify(createRequest, null, 2) + "\n\n");
   }).catch(function (aErr) {
-    if ("name" in aErr && (aErr.name == "AbortError" || aErr.name == "NS_ERROR_ABORT")) {
+    if (aErr && (aErr.name == "AbortError" || aErr.name == "NS_ERROR_ABORT")) {
       gResults.reset();
       append("createOut", "Aborted; retry?\n");
     } else {
@@ -705,7 +746,7 @@ $(document).ready(function() {
         testEqual("getOut", window.location.origin, clientData.origin, "ClientData.origin matches this origin (WD-06)");
       }
       if ("type" in clientData) {
-        testEqual("createOut", "webauthn.get", clientData.type, "Type is valid (WD-08)");
+        testEqual("getOut", "webauthn.get", clientData.type, "Type is valid (WD-08)");
       } else {
         gResults.todo("clientData.type is not set (WD-08)");
       }
@@ -756,7 +797,7 @@ $(document).ready(function() {
         test("getOut", aSignatureValid, "The token signature must be valid.");
       });
     }).catch(function (aErr) {
-      if ("name" in aErr && (aErr.name == "AbortError" || aErr.name == "NS_ERROR_ABORT")) {
+      if (aErr && (aErr.name == "AbortError" || aErr.name == "NS_ERROR_ABORT")) {
         gResults.reset();
         append("getOut", "Aborted; retry?\n");
       } else {
