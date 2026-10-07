@@ -215,7 +215,7 @@ function webAuthnDecodeCBORAttestation(aCborAttBuf) {
       append("createOut", "PEM-encoded Certificate:\n-----BEGIN CERTIFICATE-----\n" + state.attestationCertDER.replace(/(.{60})/g, "$1\n") + "\n-----END CERTIFICATE-----\n");
       console.log("DER-encoded Certificate: ", state.attestationCertDER);
 
-      let certAsn1 = org.pkijs.fromBER(getArrayBuffer("createOut", state.attestationCertDER));
+      let certAsn1 = org.pkijs.fromBER(getArrayBuffer("createOut", attObj.attStmt.x5c[0]));
       if (!test("createOut", asn1Okay(certAsn1), "Attestation Certificate parsed")) {
         throw "Attestation Certificate didn't parse correctly.";
       }
@@ -228,7 +228,7 @@ function webAuthnDecodeCBORAttestation(aCborAttBuf) {
 
       state.attestationSig = attObj.attStmt.sig;
       let sigAsn1 = org.pkijs.fromBER(getArrayBuffer("createOut", state.attestationSig));
-      if (!test("createOut", asn1Okay(certAsn1), "Attestation Signature parsed")) {
+      if (!test("createOut", asn1Okay(sigAsn1), "Attestation Signature parsed")) {
         throw "Attestation Signature failed to validate";
       }
 

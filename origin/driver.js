@@ -301,7 +301,7 @@ $(document).ready(function() {
       append("createOut", "Validity (in millis): " + (state.attestationCert.notAfter.value - state.attestationCert.notBefore.value + "\n"));
 
       let sigAsn1 = org.pkijs.fromBER(state.attestationSig.buffer);
-      if (!test("createOut", asn1Okay(certAsn1), "Attestation Signature is OK")) {
+      if (!test("createOut", asn1Okay(sigAsn1), "Attestation Signature is OK")) {
         throw "Attestation Signature failed to validate";
       }
 
