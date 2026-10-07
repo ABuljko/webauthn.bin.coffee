@@ -17,7 +17,7 @@ const cose_crv_x = -2;
 const cose_crv_y = -3;
 
 class ResultTracker {
-  construct() {
+  constructor() {
     this.reset()
   }
   reset() {
@@ -648,7 +648,7 @@ function doWebAuthnCreate(challengeBytes) {
     append("createOut", "\n\nRaw request:\n");
     append("createOut", JSON.stringify(createRequest, null, 2) + "\n\n");
   }).catch(function (aErr) {
-    if ("name" in aErr && (aErr.name == "AbortError" || aErr.name == "NS_ERROR_ABORT")) {
+    if (aErr && (aErr.name == "AbortError" || aErr.name == "NS_ERROR_ABORT")) {
       gResults.reset();
       append("createOut", "Aborted; retry?\n");
     } else {
@@ -746,7 +746,7 @@ $(document).ready(function() {
         testEqual("getOut", window.location.origin, clientData.origin, "ClientData.origin matches this origin (WD-06)");
       }
       if ("type" in clientData) {
-        testEqual("createOut", "webauthn.get", clientData.type, "Type is valid (WD-08)");
+        testEqual("getOut", "webauthn.get", clientData.type, "Type is valid (WD-08)");
       } else {
         gResults.todo("clientData.type is not set (WD-08)");
       }
@@ -797,7 +797,7 @@ $(document).ready(function() {
         test("getOut", aSignatureValid, "The token signature must be valid.");
       });
     }).catch(function (aErr) {
-      if ("name" in aErr && (aErr.name == "AbortError" || aErr.name == "NS_ERROR_ABORT")) {
+      if (aErr && (aErr.name == "AbortError" || aErr.name == "NS_ERROR_ABORT")) {
         gResults.reset();
         append("getOut", "Aborted; retry?\n");
       } else {

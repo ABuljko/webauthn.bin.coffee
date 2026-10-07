@@ -320,7 +320,7 @@ $(document).ready(function() {
       })
       .catch(function(aErr) {
         console.log("Credentials.Create: Error importing key ", aErr);
-        throw "Error Importing Key: " + err;
+        throw "Error Importing Key: " + aErr;
       });
 
     }).catch(function (aErr) {
