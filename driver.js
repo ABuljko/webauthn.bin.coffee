@@ -346,25 +346,43 @@ function importPublicKey(keyBytes) {
   return crypto.subtle.importKey("jwk", jwk, {name: "ECDSA", namedCurve: "P-256"}, true, ["verify"])
 }
 
+function derIntegerToBytes32(der, offset) {
+  if (der[offset] != 0x02) {
+    throw "Invalid signature: expected INTEGER at offset " + offset;
+  }
+  let len = der[offset + 1];
+  let value = der.subarray(offset + 2, offset + 2 + len);
+  if (len < 1 || value.length != len) {
+    throw "Invalid signature: truncated INTEGER at offset " + offset;
+  }
+  while (value.length > 32 && value[0] == 0x00) {
+    value = value.subarray(1);
+  }
+  if (value.length > 32) {
+    throw "Invalid signature: INTEGER longer than 32 bytes";
+  }
+  let bytes = new Uint8Array(32);
+  bytes.set(value, 32 - value.length);
+  return { bytes: bytes, length: len, next: offset + 2 + len };
+}
+
 function verifySignature(key, data, derSig) {
   let derSigArray = new Uint8Array(derSig);
-  if (derSig.byteLength < 70) {
+  if (derSigArray.length < 8 || derSigArray[0] != 0x30 || derSigArray[1] != derSigArray.length - 2) {
     console.log("bad sig: " + hexEncode(derSigArray))
-    throw "Invalid signature length: " + derSig.byteLength;
+    throw "Invalid signature encoding (length " + derSigArray.length + ")";
   }
 
-  // Poor man's ASN.1 decode
-  // R and S are always 32 bytes.  If ether has a DER
-  // length > 32, it's just zeros we can chop off.
-  let lenR = derSigArray[3];
-  let lenS = derSigArray[3 + lenR + 2];
-  let padR = lenR - 32;
-  let padS = lenS - 32;
+  let r = derIntegerToBytes32(derSigArray, 2);
+  let s = derIntegerToBytes32(derSigArray, r.next);
+  if (s.next != derSigArray.length) {
+    throw "Invalid signature: trailing bytes after S";
+  }
   let sig = new Uint8Array(64);
-  derSigArray.subarray(4+padR,4+lenR).map(function(x,i) { return sig[i] = x });
-  derSigArray.subarray(4+lenR+2+padS,4+lenR+2+lenS).map(function(x,i) { return sig[32+i] = x });
+  sig.set(r.bytes, 0);
+  sig.set(s.bytes, 32);
 
-  console.log("lenR:   ", lenR, " lenS: ", lenS);
+  console.log("lenR:   ", r.length, " lenS: ", s.length);
   console.log("key:    ", key, hexEncode(key));
   console.log("data:   ", data, hexEncode(data));
   console.log("derSig: ", derSigArray, hexEncode(derSigArray));
