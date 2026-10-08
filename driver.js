@@ -113,18 +113,6 @@ function buffer2string(buf) {
   return new TextDecoder().decode(buf);
 }
 
-function b64dec(str) {
-  if (str.length % 4 == 1) {
-    throw "Improper b64 string";
-  }
-
-  var b64 = str;
-  while (b64.length % 4 != 0) {
-    b64 += "=";
-  }
-  return new Uint8Array(base64js.toByteArray(b64));
-}
-
 function deriveAppAndChallengeParam(appId, clientData, attestation) {
   var appIdBuf = string2buffer(appId);
   return Promise.all([
@@ -470,124 +458,6 @@ function ecdsaSigComponents(sigAsn1) {
   return parts.map(p => new Uint8Array(p.value_block.value_hex));
 }
 
-function promiseU2FRegister(aAppId, aChallenges, aExcludedKeys, aFunc) {
-  return new Promise(function(resolve, reject) {
-      u2f.register(aAppId, aChallenges, aExcludedKeys, function(res) {
-        aFunc(res);
-        resolve(res);
-      });
-  });
-}
-
-async function assembleU2FRegisterSignedData(appId, clientData, keyHandle, publicKeyBytes) {
-  let appIdBuf = string2buffer(appId);
-  let appParam = new Uint8Array(await crypto.subtle.digest("SHA-256", appIdBuf));
-  let clientParam = new Uint8Array(await crypto.subtle.digest("SHA-256", clientData));
-
-  let signedData = new Uint8Array(1 + 32 + 32 + keyHandle.length + publicKeyBytes.length);
-  signedData[0] = 0x00;
-  appParam.map(function(x, i) { return signedData[1+i] = x });
-  clientParam.map(function(x, i) { return signedData[33+i] = x });
-  keyHandle.map(function(x, i) { return signedData[65+i] = x });
-  publicKeyBytes.map(function(x, i) { return signedData[65+keyHandle.length+i] = x });
-
-  return signedData;
-}
-
-function doU2FRegister(challengeBytes) {
-  let regRequest = {
-    version: "U2F_V2",
-    challenge: b64enc(challengeBytes),
-  };
-
-  let appId = $("#appIdText").val();
-
-  append("createOut", JSON.stringify(regRequest, null, 2) + "\n\n");
-
-  promiseU2FRegister(appId, [regRequest], [], ()=>{})
-  .then(async function(regResponse) {
-    state.regResponse = regResponse;
-    append("createOut", "Got response:\n");
-    append("createOut", JSON.stringify(regResponse, null, 2) + "\n\n");
-
-    if (regResponse.errorCode) {
-      throw "Unexpected error code: " + regResponse.errorCode;
-    }
-
-    // Parse the response data
-    var registrationData = b64dec(regResponse.registrationData);
-    if (registrationData.length < 67) {
-      throw "Registration data is too short: " + registrationData.length + " bytes";
-    }
-    if (registrationData[0] != 0x05) {
-      throw "Reserved byte not set correctly";
-    }
-
-    state.publicKeyBytes = registrationData.subarray(1, 66);
-    var keyHandleLength = registrationData[66];
-    if (registrationData.length <= 67 + keyHandleLength) {
-      throw "Key handle length " + keyHandleLength + " leaves no room for the attestation certificate";
-    }
-    state.keyHandleBytes = registrationData.subarray(67, 67 + keyHandleLength)
-    state.keyHandle = b64enc(state.keyHandleBytes);
-    state.attestation = new Uint8Array(registrationData.subarray(67 + keyHandleLength));
-
-    append("createOut", "Key Handle: " + state.keyHandle + "\n");
-
-    var certAsn1 = org.pkijs.fromBER(state.attestation.buffer);
-    if (!asn1Okay(certAsn1)) {
-      throw "Cert ASN.1 not okay";
-    }
-    state.attestationSig = new Uint8Array(state.attestation.slice(certAsn1.offset));
-    state.attestationCert = new org.pkijs.simpl.CERT({ schema: certAsn1.result });
-    append("createOut", "Attestation Cert\n");
-    append("createOut", "Subject: " + state.attestationCert.subject.types_and_values[0].value.value_block.value + "\n");
-    append("createOut", "Issuer: " + state.attestationCert.issuer.types_and_values[0].value.value_block.value + "\n");
-    append("createOut", "Validity (in millis): " + (state.attestationCert.notAfter.value - state.attestationCert.notBefore.value + "\n"));
-
-    var sigAsn1 = org.pkijs.fromBER(state.attestationSig.buffer);
-    if (!asn1Okay(sigAsn1)) {
-      throw "Signature ASN.1 not okay";
-    }
-
-    append("createOut", "Attestation Signature\n");
-    var [R, S] = ecdsaSigComponents(sigAsn1);
-    append("createOut", "R: " + hexEncode(R) + "\n");
-    append("createOut", "S: " + hexEncode(S) + "\n");
-
-    testEqual("createOut", sigAsn1.result.block_length, state.attestationSig.buffer.byteLength, "Signature buffer has no unnecessary bytes.");
-
-    // Verify that the clientData makes sense
-    var clientData = b64dec(regResponse.clientData)
-
-    var clientDataJSON = "";
-    clientData.map(function(x) { return clientDataJSON += String.fromCharCode(x) });
-    var clientDataObj = JSON.parse(clientDataJSON);
-    console.log("ClientData: ", clientDataObj);
-    testEqual("createOut", "navigator.id.finishEnrollment", clientDataObj.typ, "Correct type");
-    testEqual("createOut", b64enc(challengeBytes), clientDataObj.challenge, "Challenge matches");
-    testEqual("createOut", window.location.origin, clientDataObj.origin, "Origin matches");
-
-    // Import the attestation certificate's public key
-    state.certPubKey = await importPublicKey(new Uint8Array(state.attestationCert.subjectPublicKeyInfo.subjectPublicKey.value_block.value_hex));
-    let signedData = await assembleU2FRegisterSignedData(appId, clientData, state.keyHandleBytes, state.publicKeyBytes);
-    let verified = await verifySignature(state.certPubKey, signedData, new Uint8Array(state.attestationSig.buffer));
-    test("createOut", verified, "Verified certificate attestation signature");
-
-    state.createResponse = { rawId: state.keyHandleBytes };
-    state.publicKey = await importPublicKey(state.publicKeyBytes);
-  })
-  .catch(function (aErr) {
-    gResults.fail();
-    append("createOut", "Got error:\n");
-    append("createOut", aErr.toString() + "\n\n");
-  })
-  .then(function (){
-    resultColor("createOut");
-    append("createOut", gResults.toString());
-  });
-}
-
 function doWebAuthnCreate(challengeBytes) {
   let createRequest = {
     challenge: challengeBytes,
@@ -729,14 +599,9 @@ $(document).ready(function() {
     let challengeBytes = new Uint8Array(16);
     window.crypto.getRandomValues(challengeBytes);
 
-    if ($("#appIdText").val()) {
-      doU2FRegister(challengeBytes);
-    } else {
-
-      do {
-        doWebAuthnCreate(challengeBytes);
-      } while($("#loopForever").prop("checked"));
-    }
+    do {
+      doWebAuthnCreate(challengeBytes);
+    } while($("#loopForever").prop("checked"));
   });
 
   $("#getButton").click(function() {
