@@ -60,6 +60,11 @@ function testEqual(id, val1, val2, msg) {
   return test(id, result, msg + ": " + val1 + cmp + val2);
 }
 
+function todo(id, text) {
+  gResults.todo();
+  append(id, "[TODO] " + text + "\n");
+}
+
 function getArrayBuffer(buf) {
   if (buf.constructor === Uint8Array) {
     // buf is a shared array, and we want to make copies of particular parts
@@ -513,9 +518,11 @@ function doWebAuthnCreate(challengeBytes) {
       return aAttestation;
     });
   })
-  .then(async function (aAttestation) {
-    let flags = new Uint8Array(aAttestation.flags);
-    testEqual("createOut", flags & (flag_TUP | flag_AT) , (flag_TUP | flag_AT), "User presence and Attestation Object must both be set");
+  .then(function (aAttestation) {
+    let flags = aAttestation.flags[0];
+    if (!testEqual("createOut", flags & (flag_TUP | flag_AT), (flag_TUP | flag_AT), "User presence and Attestation Object must both be set")) {
+      throw "Attestation is missing the user presence or attested credential data flag.";
+    }
     testEqual("createOut", hexEncode(aAttestation.attestationAuthData.credId), hexEncode(state.createResponse.rawId), "Credential ID from CBOR and Raw ID match");
     state.keyHandle = state.createResponse.rawId;
     append("createOut", "Keypair Identifier: " + hexEncode(state.keyHandle) + "\n");
@@ -537,14 +544,14 @@ function doWebAuthnCreate(challengeBytes) {
 
     testEqual("createOut", b64enc(challengeBytes), clientData.challenge, "Challenge matches");
     if ("androidPackageName" in clientData) {
-      append("createOut", `Android origin is: ${clientData.origin} (unchecked)`)
+      append("createOut", `Android origin is: ${clientData.origin} (unchecked)\n`)
     } else {
       testEqual("createOut", window.location.origin, clientData.origin, "ClientData.origin matches this origin (WD-06)");
     }
     if ("type" in clientData) {
       testEqual("createOut", "webauthn.create", clientData.type, "Type is valid (WD-08)");
     } else {
-      gResults.todo("clientData.type is not set (WD-08)");
+      todo("createOut", "clientData.type is not set (WD-08)");
     }
 
   }).then(function (){
@@ -557,7 +564,7 @@ function doWebAuthnCreate(challengeBytes) {
     } else {
       gResults.fail();
       append("createOut", "Got error:\n");
-      append("createOut", aErr.toString() + "\n\n");
+      append("createOut", String(aErr) + "\n\n");
     }
   }).then(function (){
     resultColor("createOut");
@@ -635,27 +642,27 @@ $(document).ready(function() {
       let clientData = JSON.parse(buffer2string(aAssertion.response.clientDataJSON));
       testEqual("getOut", clientData.challenge, b64enc(challengeBytes), "Challenge is identical");
       if ("androidPackageName" in clientData) {
-        append("getOut", `Android origin is: ${clientData.origin} (unchecked)`)
+        append("getOut", `Android origin is: ${clientData.origin} (unchecked)\n`)
       } else {
         testEqual("getOut", window.location.origin, clientData.origin, "ClientData.origin matches this origin (WD-06)");
       }
       if ("type" in clientData) {
         testEqual("getOut", "webauthn.get", clientData.type, "Type is valid (WD-08)");
       } else {
-        gResults.todo("clientData.type is not set (WD-08)");
+        todo("getOut", "clientData.type is not set (WD-08)");
       }
 
-      append("getOut", `Extensions: ${JSON.stringify(aAssertion.getClientExtensionResults())}\n`);
+      let extensionResults = aAssertion.getClientExtensionResults();
+      append("getOut", `Extensions: ${JSON.stringify(extensionResults)}\n`);
 
       return webAuthnDecodeAuthDataArray(aAssertion.response.authenticatorData)
-      .then(async function(aAttestation) {
-        if (!testEqual("getOut", new Uint8Array(aAttestation.flags) & flag_TUP, flag_TUP, "User presence must be the only flag set")) {
+      .then(function(aAttestation) {
+        let flags = aAttestation.flags[0];
+        if (!testEqual("getOut", flags & flag_TUP, flag_TUP, "User presence flag must be set")) {
           throw "Assertion's user presence byte not set correctly.";
         }
 
         testEqual("getOut", aAttestation.counter.byteLength, 4, "Counter must be 4 bytes");
-
-        let flags = new Uint8Array(aAttestation.flags);
 
         append("getOut", "\n:: CBOR Attestation Object Data ::\n");
         append("getOut", "RP ID Hash: " + hexEncode(aAttestation.rpIdHash) + "\n");
@@ -663,13 +670,10 @@ $(document).ready(function() {
         append("getOut", "\n");
 
         // Assemble the signed data and verify the signature
-        appId = window.location.hostname
-
-        if ("appid" in aAssertion.getClientExtensionResults() && aAssertion.getClientExtensionResults().appid) {
+        let appId = rpid;
+        if (extensionResults.appid) {
           appId = $("#appIdText").val();
           append("getOut", `AppID extension set, using ${appId} as the value to hash\n`);
-        } else if ($("#rpIdText").val()) {
-          appId = $("#rpIdText").val();
         }
 
         return deriveAppAndChallengeParam(appId, aAssertion.response.clientDataJSON, aAttestation);
@@ -683,7 +687,7 @@ $(document).ready(function() {
                                   aParams.attestation.counter, aParams.challengeParam);
       })
       .then(function(aSignedData) {
-        append("getOut", "Signed Data assembled: " + aSignedData + "\n");
+        append("getOut", "Signed Data assembled: " + hexEncode(aSignedData) + "\n");
         console.log(state.publicKey, aSignedData, aAssertion.response.signature);
         return verifySignature(state.publicKey, aSignedData, getArrayBuffer(aAssertion.response.signature));
       })
@@ -697,7 +701,7 @@ $(document).ready(function() {
       } else {
         gResults.fail();
         append("getOut", "Got error:\n");
-        append("getOut", aErr.toString() + "\n\n");
+        append("getOut", String(aErr) + "\n\n");
       }
     }).then(function (){
       append("getOut", "\n\nRaw request:\n");
