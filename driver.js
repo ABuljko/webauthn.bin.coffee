@@ -173,7 +173,7 @@ function isCborMap(aValue) {
          && !Array.isArray(aValue) && !(aValue instanceof Uint8Array);
 }
 
-function webAuthnDecodeCBORAttestation(aCborAttBuf) {
+function webAuthnDecodeCBORAttestation(aCborAttBuf, aClientDataJSON) {
   let attObj = CBOR.decode(aCborAttBuf);
   console.log(":: Attestation CBOR Object ::");
   if (!(isCborMap(attObj) && typeof attObj.fmt === "string"
@@ -232,6 +232,14 @@ function webAuthnDecodeCBORAttestation(aCborAttBuf) {
       let [R, S] = ecdsaSigComponents(sigAsn1);
       append("createOut", "R-component: " + hexEncode(R) + "\n");
       append("createOut", "S-component: " + hexEncode(S) + "\n");
+
+      let certPubKey = await importPublicKey(new Uint8Array(state.attestationCert.subjectPublicKeyInfo.subjectPublicKey.value_block.value_hex));
+      let clientDataHash = await crypto.subtle.digest("SHA-256", aClientDataJSON);
+      let signedData = assembleRegistrationSignedData(aAttestationObj.rpIdHash, clientDataHash,
+                                                      aAttestationObj.attestationAuthData.credId,
+                                                      aAttestationObj.publicKeyBytes);
+      let verified = await verifySignature(certPubKey, signedData, state.attestationSig);
+      test("createOut", verified, "Attestation signature verified with the certificate's key");
 
       aAttestationObj.attestationObject = attObj;
       return aAttestationObj;
@@ -507,7 +515,7 @@ function doWebAuthnCreate(challengeBytes) {
     console.log("Credentials.Create response: ", aNewCredentialInfo);
 
     let buffer = getArrayBuffer(aNewCredentialInfo.response.attestationObject);
-    return webAuthnDecodeCBORAttestation(buffer);
+    return webAuthnDecodeCBORAttestation(buffer, aNewCredentialInfo.response.clientDataJSON);
   })
   .then(function (aAttestation) {
     // Make sure the RP ID hash matches what we calculate.
