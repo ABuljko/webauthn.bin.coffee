@@ -1,11 +1,7 @@
-var lookup = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-
-;(function (exports) {
+(function (exports) {
   'use strict'
 
-  var Arr = (typeof Uint8Array !== 'undefined')
-    ? Uint8Array
-    : Array
+  var lookup = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 
   var PLUS = '+'.charCodeAt(0)
   var SLASH = '/'.charCodeAt(0)
@@ -41,7 +37,7 @@ var lookup = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
     placeHolders = b64.charAt(len - 1) !== '=' ? 0 : b64.charAt(len - 2) === '=' ? 2 : 1
 
     // base64 is 4/3 + up to two characters of the original data
-    arr = new Arr(b64.length * 3 / 4 - placeHolders)
+    arr = new Uint8Array(b64.length * 3 / 4 - placeHolders)
 
     // if there are placeholders, only get up to the last complete 4 chars
     l = placeHolders > 0 ? b64.length - 4 : b64.length
@@ -120,4 +116,4 @@ var lookup = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 
   exports.toByteArray = b64ToByteArray
   exports.fromByteArray = uint8ToBase64
-}(typeof exports === 'undefined' ? (this.base64js = {}) : exports))
+}(this.base64js = {}))
