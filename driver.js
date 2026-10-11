@@ -98,6 +98,11 @@ function buffer2string(buf) {
   return new TextDecoder().decode(buf);
 }
 
+// JSON.stringify replacer that shows binary fields as base64url.
+function jsonBytes(key, value) {
+  return (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) ? b64enc(value) : value;
+}
+
 async function sha256(data) {
   return new Uint8Array(await crypto.subtle.digest("SHA-256", data));
 }
@@ -143,6 +148,14 @@ function isCborMap(aValue) {
          && !Array.isArray(aValue) && !(aValue instanceof Uint8Array);
 }
 
+const dnNames = { "2.5.4.3": "CN", "2.5.4.6": "C", "2.5.4.7": "L", "2.5.4.8": "ST", "2.5.4.10": "O", "2.5.4.11": "OU" };
+
+function formatName(name) {
+  return name.typesAndValues
+             .map(tv => `${dnNames[tv.type] ?? tv.type}=${tv.value.valueBlock.value}`)
+             .join(", ");
+}
+
 async function webAuthnDecodeCBORAttestation(aCborAttBuf, aClientDataJSON) {
   const attObj = CBOR.decode(aCborAttBuf);
   console.log(":: Attestation CBOR Object ::", attObj);
@@ -176,9 +189,9 @@ async function webAuthnDecodeCBORAttestation(aCborAttBuf, aClientDataJSON) {
 
     const cert = state.attestationCert = new Certificate({ schema: certAsn1.result });
     append("createOut", "Attestation Cert\n");
-    append("createOut", `Subject: ${cert.subject.typesAndValues[0].value.valueBlock.value}\n`);
-    append("createOut", `Issuer: ${cert.issuer.typesAndValues[0].value.valueBlock.value}\n`);
-    append("createOut", `Validity (in millis): ${cert.notAfter.value - cert.notBefore.value}\n`);
+    append("createOut", `Subject: ${formatName(cert.subject)}\n`);
+    append("createOut", `Issuer: ${formatName(cert.issuer)}\n`);
+    append("createOut", `Validity: ${cert.notBefore.value.toISOString()} to ${cert.notAfter.value.toISOString()}\n`);
 
     try {
       test("createOut", await cert.verify(), "Attestation certificate signature verified successfully");
@@ -452,7 +465,7 @@ async function doWebAuthnCreate(challengeBytes) {
 
   state.createRequest = createRequest;
 
-  console.log(`let createRequest = ${JSON.stringify(createRequest, null, 2)}`);
+  console.log(`let createRequest = ${JSON.stringify(createRequest, jsonBytes, 2)}`);
   console.log("navigator.credentials.create({ publicKey: createRequest })");
 
   try {
@@ -500,7 +513,7 @@ async function doWebAuthnCreate(challengeBytes) {
     }
 
     append("createOut", "\n\nRaw request:\n");
-    append("createOut", `${JSON.stringify(createRequest, null, 2)}\n\n`);
+    append("createOut", `${JSON.stringify(createRequest, jsonBytes, 2)}\n\n`);
   } catch (aErr) {
     reportError("createOut", aErr);
   }
@@ -603,7 +616,7 @@ async function doWebAuthnGet() {
   }
 
   append("getOut", "\n\nRaw request:\n");
-  append("getOut", `${JSON.stringify(publicKeyCredentialRequestOptions, null, 2)}\n\n`);
+  append("getOut", `${JSON.stringify(publicKeyCredentialRequestOptions, jsonBytes, 2)}\n\n`);
   resultColor("getOut");
   append("getOut", `${gResults}\n\n`);
 }
